@@ -287,6 +287,18 @@ export default function Home() {
     setLog((l) => [...l, `Done. Created ${created} certificates`]);
     if (limit) setStatusTen({ state: "done", created, errors: errors.length });
     else setStatusAll({ state: "done", created, errors: errors.length });
+    
+    // Show preview of the first generated certificate
+    const firstCreated = results.find((r: any) => r.status === "created");
+    if (firstCreated) {
+      setLastPreview({
+        imageUrl: firstCreated.imageUrl,
+        certificateNumber: firstCreated.certificateNumber,
+        fullName: firstCreated.fullName || "Unknown",
+      });
+      setLog((l) => [...l, `Preview: ${firstCreated.certificateNumber}`]);
+    }
+    
     if (errors.length) {
       for (const err of errors) {
         setLog((l) => [...l, `Row '${err.fullName}': ${err.error}`]);

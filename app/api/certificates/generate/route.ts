@@ -119,6 +119,9 @@ export async function POST(req: Request) {
           .png()
           .toBuffer();
 
+        // ===== PDF GENERATION DISABLED =====
+        // Uncomment below if you need PDF files in the future
+        /*
         // Create PDF via pdf-lib with the PNG embedded full-page
         const pdfDoc = await PDFDocument.create();
         const pngImage = await pdfDoc.embedPng(pngOut);
@@ -130,6 +133,7 @@ export async function POST(req: Request) {
           height: pngImage.height,
         });
         const pdfOut = await pdfDoc.save();
+        */
 
         // Save outputs locally
         const imagesDir = path.join(
@@ -137,14 +141,14 @@ export async function POST(req: Request) {
           "certificate-store",
           "images"
         );
-        const pdfsDir = path.join(process.cwd(), "certificate-store", "pdfs");
+        // const pdfsDir = path.join(process.cwd(), "certificate-store", "pdfs");
         await fs.promises.mkdir(imagesDir, { recursive: true });
-        await fs.promises.mkdir(pdfsDir, { recursive: true });
+        // await fs.promises.mkdir(pdfsDir, { recursive: true });
         const fileBase = `${certificateNumber}`;
         const imagePath = path.join(imagesDir, `${fileBase}.png`);
-        const pdfPath = path.join(pdfsDir, `${fileBase}.pdf`);
+        // const pdfPath = path.join(pdfsDir, `${fileBase}.pdf`);
         await fs.promises.writeFile(imagePath, pngOut);
-        await fs.promises.writeFile(pdfPath, pdfOut);
+        // await fs.promises.writeFile(pdfPath, pdfOut);
 
         const created = await prisma.certificate.create({
           data: {
@@ -159,8 +163,9 @@ export async function POST(req: Request) {
           certificateNumber,
           status: "created",
           id: created.id,
+          fullName: row.fullName,
           imageUrl: imagePath,
-          pdfUrl: pdfPath,
+          // pdfUrl: pdfPath, // PDF generation disabled
         });
       } catch (err: any) {
         results.push({
