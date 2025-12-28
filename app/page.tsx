@@ -252,14 +252,15 @@ export default function Home() {
     setLog((l) => [...l, "Generating certificates..."]);
     const body = limit
       ? {
-          batchId,
-          templateId,
-          rows: preview.slice(0, limit),
-        }
+        batchId,
+        templateId,
+        rows: preview.slice(0, limit),
+      }
       : {
-          batchId,
-          templateId,
-        };
+        batchId,
+        templateId,
+        rows: preview, // Send all preview rows
+      };
     const res = await fetch("/api/certificates/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -443,22 +444,20 @@ export default function Home() {
                 <div className="flex items-center gap-1 rounded-full bg-white/10 p-1">
                   <span className="px-2 text-xs opacity-80">Position:</span>
                   <button
-                    className={`rounded-full px-3 py-1 text-xs ${
-                      placeMode === "name"
+                    className={`rounded-full px-3 py-1 text-xs ${placeMode === "name"
                         ? "bg-white text-black"
                         : "bg-transparent hover:bg-white/20"
-                    }`}
+                      }`}
                     onClick={() => setPlaceMode("name")}
                     title="Position Name"
                   >
                     Name
                   </button>
                   <button
-                    className={`rounded-full px-3 py-1 text-xs ${
-                      placeMode === "qr"
+                    className={`rounded-full px-3 py-1 text-xs ${placeMode === "qr"
                         ? "bg-white text-black"
                         : "bg-transparent hover:bg-white/20"
-                    }`}
+                      }`}
                     onClick={() => setPlaceMode("qr")}
                     title="Position QR"
                   >
@@ -603,9 +602,8 @@ export default function Home() {
                     return (
                       <>
                         <div
-                          className={`absolute -translate-x-1/2 -translate-y-1/2 cursor-move rounded px-1 text-xs font-semibold leading-none whitespace-nowrap drop-shadow ${
-                            placeMode === "name" ? "scale-105" : "opacity-90"
-                          }`}
+                          className={`absolute -translate-x-1/2 -translate-y-1/2 cursor-move rounded px-1 text-xs font-semibold leading-none whitespace-nowrap drop-shadow ${placeMode === "name" ? "scale-105" : "opacity-90"
+                            }`}
                           style={{
                             left: namePos.x,
                             top: namePos.y + baselineDy,
@@ -622,9 +620,8 @@ export default function Home() {
                           {sampleName}
                         </div>
                         <div
-                          className={`absolute cursor-move rounded border-2 border-indigo-500/80 bg-indigo-500/20 text-[10px] text-white ${
-                            placeMode === "qr" ? "ring-2 ring-white" : ""
-                          }`}
+                          className={`absolute cursor-move rounded border-2 border-indigo-500/80 bg-indigo-500/20 text-[10px] text-white ${placeMode === "qr" ? "ring-2 ring-white" : ""
+                            }`}
                           style={{
                             left: qrPos.x,
                             top: qrPos.y,
@@ -786,8 +783,8 @@ export default function Home() {
                   alt="Generated preview"
                   className="w-full max-h-80 object-contain"
                 />
-    `          </div>
-          `  </div>
+                `          </div>
+              `  </div>
           )}
         </Section>
       </div>
