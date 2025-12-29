@@ -145,7 +145,14 @@ export async function POST(req: Request) {
         // const pdfsDir = path.join(process.cwd(), "certificate-store", "pdfs");
         await fs.promises.mkdir(imagesDir, { recursive: true });
         // await fs.promises.mkdir(pdfsDir, { recursive: true });
-        const fileBase = `${certificateNumber}`;
+        const nameSlug = fullName
+          .toLowerCase()
+          .trim()
+          .split(/\s+/)
+          .slice(0, 2)
+          .join("-")
+          .replace(/[^a-z0-9-]/g, "");
+        const fileBase = `${nameSlug}-${certificateNumber}`;
         const imagePath = path.join(imagesDir, `${fileBase}.png`);
         // const pdfPath = path.join(pdfsDir, `${fileBase}.pdf`);
         await fs.promises.writeFile(imagePath, pngOut);
@@ -156,7 +163,7 @@ export async function POST(req: Request) {
             fullName: fullName,
             email: row.email ?? null,
             certificateNumber,
-            qrData: verifyUrl,
+            qrData: certificateNumber,
             imagePath: imagePath,
             // pdfUrl: pdfPath,
           },
