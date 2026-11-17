@@ -1,198 +1,215 @@
 import { NextResponse } from "next/server";
+import fs from "node:fs/promises";
 import { prisma } from "@/lib/prisma";
+import { getAppUrl, getIssuerConfig } from "@/lib/issuer";
+import { resolveStoredFile } from "@/lib/storage";
 import { sendEmail } from "@/lib/mail";
-import fs from "node:fs";
-import path from "node:path";
 
-export async function POST(req: Request) {
-    try {
-        const { certificateIds, customMessage } = await req.json();
+export const runtime = "nodejs";
 
-        if (!certificateIds || !Array.isArray(certificateIds)) {
-            return NextResponse.json(
-                { error: "certificateIds array required" },
-                { status: 400 }
-            );
-        }
+type SendResult = {
+  id: string;
+  fullName?: string;
+  email?: string;
+  status: "sent" | "skipped" | "failed" | "error";
+  reason?: string;
+  error?: string;
+};
 
-        const results: any[] = [];
+const MAX_BATCH_SIZE = 100;
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const SENDING_LEASE_MS = 15 * 60 * 1000;
 
-        for (const certId of certificateIds) {
-            try {
-                const certificate = await prisma.certificate.findUnique({
-                    where: { id: certId },
-                });
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[character]!);
+}
 
-                if (!certificate) {
-                    results.push({
-                        id: certId,
-                        status: "error",
-                        error: "Certificate not found",
-                    });
-                    continue;
-                }
+function isValidEmail(value: string): boolean {
+  return value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
 
-                if (!certificate.email || certificate.email.trim() === "") {
-                    results.push({
-                        id: certId,
-                        fullName: certificate.fullName,
-                        status: "skipped",
-                        reason: "No email address",
-                    });
-                    continue;
-                }
+function formatName(fullName: string): string {
+  return fullName
+    .trim()
+    .split(/\s+/)
+    .map((word) => word.charAt(0).toLocaleUpperCase() + word.slice(1).toLocaleLowerCase())
+    .join(" ");
+}
 
-                // Skip if email was already sent successfully
-                if (certificate.emailStatus === "SUCCESS") {
-                    results.push({
-                        id: certId,
-                        fullName: certificate.fullName,
-                        email: certificate.email,
-                        status: "skipped",
-                        reason: "Already sent",
-                    });
-                    continue;
-                }
+function renderEmail(input: {
+  recipientName: string;
+  message: string;
+  verifyUrl: string;
+  issuerName: string;
+  websiteUrl?: string;
+  linkedinUrl?: string;
+  supportEmail?: string;
+}): string {
+  const links = [input.websiteUrl, input.linkedinUrl].filter((value): value is string => Boolean(value));
+  const organizationLink = links.map((url) =>
+    `<a href="${escapeHtml(url)}" rel="noopener noreferrer">${escapeHtml(input.issuerName)}</a>`
+  ).join(" · ");
+  const support = input.supportEmail
+    ? `<p>Support: <a href="mailto:${escapeHtml(input.supportEmail)}">${escapeHtml(input.supportEmail)}</a></p>`
+    : "";
 
-                if (!certificate.imagePath || !fs.existsSync(certificate.imagePath)) {
-                    results.push({
-                        id: certId,
-                        fullName: certificate.fullName,
-                        status: "error",
-                        error: "Certificate image not found",
-                    });
-                    continue;
-                }
+  return `<!doctype html>
+<html><body style="margin:0;background:#f4f4f5;font-family:Arial,sans-serif;color:#27272a;line-height:1.6">
+  <main style="max-width:600px;margin:24px auto;padding:24px;background:#fff;border-radius:12px">
+    <h1 style="font-size:24px">Congratulations, ${escapeHtml(input.recipientName)}!</h1>
+    <p>${escapeHtml(input.message).replace(/\r\n|\r|\n/g, "<br>")}</p>
+    <p>Your certificate is attached. You can also verify it online:</p>
+    <p><a href="${escapeHtml(input.verifyUrl)}" rel="noopener noreferrer">Verify certificate</a></p>
+    <p>Keep your certificate safe as proof of your achievement.</p>
+    ${support}
+    <hr style="border:0;border-top:1px solid #e4e4e7;margin:24px 0">
+    <footer style="font-size:12px;color:#71717a">Issued by ${organizationLink || escapeHtml(input.issuerName)}</footer>
+  </main>
+</body></html>`;
+}
 
-                // Read the certificate image
-                const imageBuffer = await fs.promises.readFile(certificate.imagePath);
-                const imageBase64 = imageBuffer.toString("base64");
-
-                // Create email HTML with custom message
-                const verifyUrl = `${process.env.APP_URL || "http://localhost:3000"}/verify/${certificate.certificateNumber}`;
-                const titleCaseName = certificate.fullName
-                    .split(" ")
-                    .map((word: string) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-                    .join(" ");
-
-                const emailHtml = `
-          <!DOCTYPE html>
-          <html>
-            <head>
-              <style>
-                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-                .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-                .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
-                .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }
-                .button { display: inline-block; background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; margin: 20px 0; }
-                .footer { text-align: center; margin-top: 10px; color: #666; font-size: 12px; }
-              </style>
-            </head>
-            <body>
-              <div class="container">
-                <div class="header">
-                  <h1>Congratulations, ${titleCaseName}!</h1>
-                </div>
-                <div class="content">
-                  <p>${customMessage || "We are pleased to present you with your certificate from Addis Ababa University Technology Workshop."}</p>
-                  
-                  <p>Your certificate is attached to this email. You can also verify it online anytime either via the qr code directly from the certificate or this link:</p>
-                  
-                  <div style="text-align: center;">
-                    <a href="${verifyUrl}" target="_blank">Verify Certificate Online</a>
-                  </div>
-                  
-                  <p style="margin-top: 20px;">Keep this certificate safe as proof of your achievement!</p>
-                  
-                  <div style="text-align: center;">
-                    <p style="font-size: 14px; color: #555;">Download & share your achievement on LinkedIn and mention our page to shine! ✨</p>
-                    <a href="https://www.linkedin.com/company/aau-tech-club/" style="display: inline-block; background: #0077b5; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold; font-size: 14px;">
-                      Follow ATC on LinkedIn
-                    </a>
-                    <p style="font-size: 12px; color: #888; margin-top: 10px;">For further opportunities and updates.</p>
-                  </div>
-                </div>
-                <div class="footer">
-                  <p>Addis Ababa University Technology Club Workshop Team</p>
-                </div>
-              </div>
-            </body>
-          </html>
-        `;
-
-                // Send email with attachment
-                const result = await sendEmail(
-                    certificate.email,
-                    `🎓 Your Certificate from AAU Technology Workshop Team - ${certificate.certificateNumber}`,
-                    emailHtml,
-                    [
-                        {
-                            filename: `${certificate.certificateNumber}.png`,
-                            content: imageBase64,
-                            encoding: "base64",
-                        },
-                    ]
-                );
-
-                if (result.success) {
-                    await prisma.certificate.update({
-                        where: { id: certId },
-                        data: {
-                            emailSentAt: new Date(),
-                            emailStatus: "SUCCESS",
-                            emailError: null,
-                        },
-                    });
-
-                    results.push({
-                        id: certId,
-                        fullName: certificate.fullName,
-                        email: certificate.email,
-                        status: "sent",
-                    });
-                } else {
-                    await prisma.certificate.update({
-                        where: { id: certId },
-                        data: {
-                            emailStatus: "FAILED",
-                            emailError: String(result.error || "Unknown error"),
-                        },
-                    });
-
-                    results.push({
-                        id: certId,
-                        fullName: certificate.fullName,
-                        email: certificate.email,
-                        status: "failed",
-                        error: String(result.error),
-                    });
-                }
-            } catch (err: any) {
-                results.push({
-                    id: certId,
-                    status: "error",
-                    error: err?.message || "Unknown error",
-                });
-            }
-        }
-
-        const sent = results.filter((r) => r.status === "sent").length;
-        const failed = results.filter((r) => r.status === "failed" || r.status === "error").length;
-
-        return NextResponse.json({
-            results,
-            summary: {
-                total: certificateIds.length,
-                sent,
-                failed,
-                skipped: results.filter((r) => r.status === "skipped").length,
-            },
-        });
-    } catch (error) {
-        console.error(error);
-        return NextResponse.json(
-            { error: "Internal Server Error" },
-            { status: 500 }
-        );
+export async function POST(request: Request) {
+  try {
+    const contentLength = Number(request.headers.get("content-length") || 0);
+    if (contentLength > 128 * 1024) {
+      return NextResponse.json({ error: "Email request is too large" }, { status: 413 });
     }
+    const body: unknown = await request.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return NextResponse.json({ error: "Invalid email request" }, { status: 400 });
+    }
+    const payload = body as Record<string, unknown>;
+    if (!Array.isArray(payload.certificateIds) || payload.certificateIds.length === 0 || payload.certificateIds.length > MAX_BATCH_SIZE) {
+      return NextResponse.json({ error: `certificateIds must contain 1 to ${MAX_BATCH_SIZE} IDs` }, { status: 400 });
+    }
+
+    const certificateIds = [...new Set(payload.certificateIds)];
+    if (certificateIds.some((id) => typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id))) {
+      return NextResponse.json({ error: "certificateIds contains an invalid ID" }, { status: 400 });
+    }
+
+    const issuer = getIssuerConfig();
+    const appUrl = getAppUrl();
+    const emailSubject =
+      typeof payload.customSubject === "string" && payload.customSubject.trim()
+        ? payload.customSubject.trim()
+        : issuer.defaultEmailSubject;
+    const messageText =
+      typeof payload.customMessage === "string" && payload.customMessage.trim()
+        ? payload.customMessage.trim()
+        : issuer.defaultEmailMessage;
+    if (!emailSubject || emailSubject.length > 200 || /[\r\n]/.test(emailSubject)) {
+      return NextResponse.json({ error: "Email subject must be a single line of at most 200 characters" }, { status: 400 });
+    }
+    if (messageText.length > 5000) {
+      return NextResponse.json({ error: "Email message must be 5000 characters or fewer" }, { status: 400 });
+    }
+
+    const results: SendResult[] = [];
+    const staleLeaseBefore = new Date(Date.now() - SENDING_LEASE_MS);
+
+    for (const certificateId of certificateIds as string[]) {
+      let claimed = false;
+      try {
+        const certificate = await prisma.certificate.findUnique({ where: { id: certificateId } });
+        if (!certificate) {
+          results.push({ id: certificateId, status: "error", error: "Certificate not found" });
+          continue;
+        }
+        if (certificate.emailStatus === "SUCCESS" || certificate.emailSentAt) {
+          results.push({ id: certificateId, fullName: certificate.fullName, email: certificate.email ?? undefined, status: "skipped", reason: "Already sent" });
+          continue;
+        }
+        if (!certificate.email || !isValidEmail(certificate.email.trim())) {
+          results.push({ id: certificateId, fullName: certificate.fullName, status: "skipped", reason: "No valid email address" });
+          continue;
+        }
+        if (!certificate.imagePath) {
+          results.push({ id: certificateId, fullName: certificate.fullName, email: certificate.email, status: "error", error: "Certificate image is unavailable" });
+          continue;
+        }
+
+        const claim = await prisma.certificate.updateMany({
+          where: {
+            id: certificateId,
+            emailSentAt: null,
+            AND: [
+              { OR: [{ emailStatus: null }, { emailStatus: { not: "SUCCESS" } }] },
+              {
+                OR: [
+                  { emailStatus: { not: "SENDING" } },
+                  { emailSendingAt: null },
+                  { emailSendingAt: { lt: staleLeaseBefore } },
+                ],
+              },
+            ],
+          },
+          data: { emailStatus: "SENDING", emailSendingAt: new Date(), emailError: null },
+        });
+        if (claim.count !== 1) {
+          results.push({ id: certificateId, fullName: certificate.fullName, email: certificate.email, status: "skipped", reason: "Already sent or another send is in progress" });
+          continue;
+        }
+        claimed = true;
+
+        const imagePath = resolveStoredFile("images", certificate.imagePath);
+        const imageBuffer = await fs.readFile(imagePath);
+        if (imageBuffer.byteLength > MAX_ATTACHMENT_BYTES) {
+          throw new Error("Certificate attachment exceeds the size limit");
+        }
+        const verifyUrl = `${appUrl}/verify/${encodeURIComponent(certificate.certificateNumber)}`;
+        const html = renderEmail({
+          recipientName: formatName(certificate.fullName),
+          message: messageText,
+          verifyUrl,
+          issuerName: issuer.name,
+          websiteUrl: issuer.websiteUrl,
+          linkedinUrl: issuer.linkedinUrl,
+          supportEmail: issuer.supportEmail,
+        });
+
+        const delivery = await sendEmail(
+          certificate.email,
+          emailSubject,
+          html,
+          [{ filename: `${certificate.certificateNumber}.png`, content: imageBuffer }]
+        );
+        if (!delivery.success) throw new Error("Email delivery failed");
+
+        await prisma.certificate.update({
+          where: { id: certificateId },
+          data: { emailSentAt: new Date(), emailSendingAt: null, emailStatus: "SUCCESS", emailError: null },
+        });
+        results.push({ id: certificateId, fullName: certificate.fullName, email: certificate.email, status: "sent" });
+      } catch {
+        if (claimed) {
+          await prisma.certificate.updateMany({
+            where: { id: certificateId, emailStatus: "SENDING" },
+            data: { emailStatus: "FAILED", emailSendingAt: null, emailError: "Email delivery failed" },
+          }).catch(() => undefined);
+        }
+        results.push({ id: certificateId, status: "failed", error: "Email delivery failed" });
+      }
+    }
+
+    const sent = results.filter((result) => result.status === "sent").length;
+    const failed = results.filter((result) => result.status === "failed" || result.status === "error").length;
+    return NextResponse.json({
+      results,
+      summary: {
+        total: certificateIds.length,
+        sent,
+        failed,
+        skipped: results.filter((result) => result.status === "skipped").length,
+      },
+    });
+  } catch {
+    return NextResponse.json({ error: "Email request failed" }, { status: 500 });
+  }
 }

@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { getIssuerConfig } from "@/lib/issuer";
 import { notFound } from "next/navigation";
 
 export default async function VerifyPage({
@@ -7,20 +8,15 @@ export default async function VerifyPage({
     params: Promise<{ id: string }>;
 }) {
     const { id } = await params;
+    if (!/^[A-Za-z0-9-]{4,50}$/.test(id)) notFound();
 
-    // Try finding by internal ID (UUID) first, then by Certificate Number (Serial)
-    const certificate = await prisma.certificate.findFirst({
-        where: {
-            OR: [
-                { id },
-                { certificateNumber: id }
-            ]
-        },
-    });
+    const certificate = await prisma.certificate.findUnique({ where: { certificateNumber: id } });
 
     if (!certificate) {
         notFound();
     }
+    const issuer = getIssuerConfig();
+    const issuerLink = issuer.websiteUrl || issuer.linkedinUrl;
 
     return (
         <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
@@ -46,7 +42,12 @@ export default async function VerifyPage({
                     Certificate Verified
                 </h1>
                 <p className="text-slate-500 mb-8">
-                    This certificate is authentic and has been verified by <a href="https://www.linkedin.com/company/aau-tech-club/" target="_blank" className="text-blue-600">Addis Ababa Technology Club</a>.
+                    This certificate is authentic and has been verified by{" "}
+                    {issuerLink ? (
+                        <a href={issuerLink} target="_blank" rel="noopener noreferrer" className="text-blue-600">
+                            {issuer.name}
+                        </a>
+                    ) : issuer.name}.
                 </p>
 
                 <div className="space-y-4 text-left border-t border-slate-100 pt-6">
@@ -72,8 +73,8 @@ export default async function VerifyPage({
                         <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
                             Issue Date
                         </label>
-                        <p className="text-slate-700">
-                            {new Date(certificate.issuedAt).toLocaleDateString("en-US", {
+                            <p className="text-slate-700">
+                            {new Date(certificate.issuedAt).toLocaleDateString(issuer.locale, {
                                 year: "numeric",
                                 month: "long",
                                 day: "numeric",
@@ -84,7 +85,12 @@ export default async function VerifyPage({
 
                 <div className="mt-10 pt-6 border-t border-slate-100">
                     <p className="text-xs text-slate-400">
-                        Signed by <a href="https://t.me/AAU_Tech_Club" target="_blank" className="text-blue-600">Addis Ababa Technology Club</a>
+                        Signed by{" "}
+                        {issuerLink ? (
+                            <a href={issuerLink} target="_blank" rel="noopener noreferrer" className="text-blue-600">
+                                {issuer.name}
+                            </a>
+                        ) : issuer.name}
                     </p>
                 </div>
             </div>

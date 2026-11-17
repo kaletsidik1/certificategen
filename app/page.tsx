@@ -1,20 +1,45 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
 
 type PreviewRow = { fullName: string; email?: string };
-type PlacementSnapshot = {
-  nameX: number;
-  nameY: number;
-  qrX: number;
-  qrY: number;
-  fontSize: number;
-  qrSize: number;
-  fontFamily: string;
-  fontWeight: string;
-  fontColor: string;
-  sampleName: string;
+type GenerationResult =
+  | {
+      id: string;
+      status: "created";
+      certificateNumber: string;
+      imageUrl: string;
+      fullName: string;
+    }
+  | { status: "error"; fullName?: string; error?: string }
+  | { status: "skipped"; certificateNumber?: string; fullName?: string };
+type EmailResult = {
+  id?: string;
+  fullName?: string;
+  email?: string;
+  status: "sent" | "skipped" | "failed" | "error";
+  reason?: string;
+  error?: string;
 };
+type EmailSummary = { sent?: number; failed?: number; skipped?: number };
+type SendEmailsResponse = {
+  error?: string;
+  results?: EmailResult[];
+  summary?: EmailSummary;
+};
+type PublicIssuerConfig = {
+  name: string;
+  websiteUrl?: string;
+  linkedinUrl?: string;
+  supportEmail?: string;
+  defaultEmailSubject: string;
+  defaultEmailMessage: string;
+  appUrl: string;
+};
+
+const GENERATED_CERTIFICATE_IDS_KEY = "certificate-platform-generated-certificate-ids";
+const LEGACY_GENERATED_CERTIFICATE_IDS_KEY = "aau-generated-certificate-ids";
 
 function Section({
   title,
@@ -36,6 +61,12 @@ function Section({
 export default function Home() {
   // Data Source
   const [sheetUrl, setSheetUrl] = useState("");
+  const [programName, setProgramName] = useState("Certificate Program");
+  const [issuerName, setIssuerName] = useState("Certificate Issuer");
+  const [publicAppUrl, setPublicAppUrl] = useState("");
+  const [configurationStatus, setConfigurationStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [isLoadingSheet, setIsLoadingSheet] = useState(false);
+  const [isUploadingTemplate, setIsUploadingTemplate] = useState(false);
   const [preview, setPreview] = useState<PreviewRow[]>([]);
   const [allRows, setAllRows] = useState<PreviewRow[]>([]);
   const [total, setTotal] = useState<number | null>(null);
@@ -49,13 +80,11 @@ export default function Home() {
   const [qrX, setQrX] = useState(100);
   const [qrY, setQrY] = useState(100);
   const [fontSize, setFontSize] = useState(48);
-  const [fontFamily, setFontFamily] = useState("Inter");
+  const fontFamily = "Inter";
   const [fontWeight, setFontWeight] = useState("600");
   const [fontColor, setFontColor] = useState("#000000");
   const [sampleName, setSampleName] = useState("Jane Doe");
   const [qrSize, setQrSize] = useState(200);
-  const [savedPlacement, setSavedPlacement] =
-    useState<PlacementSnapshot | null>(null);
   const [lastPreview, setLastPreview] = useState<{
     imageUrl: string;
     certificateNumber: string;
@@ -77,9 +106,11 @@ export default function Home() {
     errors?: number;
     message?: string;
   }>({ state: "idle" });
+  const [customSubject, setCustomSubject] = useState("Your certificate from Certificate Issuer");
   const [customMessage, setCustomMessage] = useState(
-    "We are pleased to present you with your certificate from Addis Ababa University Technology club workshop team!"
+    "Congratulations on completing your program with Certificate Issuer! We are pleased to share your certificate and wish you continued success."
   );
+  const [generatedCertificateIds, setGeneratedCertificateIds] = useState<string[]>([]);
   const [emailStatus, setEmailStatus] = useState<{
     state: "idle" | "loading" | "done" | "error";
     sent?: number;
@@ -95,12 +126,46 @@ export default function Home() {
   }>>([]);
   const [emailFilter, setEmailFilter] = useState<"all" | "sent" | "skipped" | "failed">("all");
 
+  useEffect(() => {
+    try {
+      const currentQueue = sessionStorage.getItem(GENERATED_CERTIFICATE_IDS_KEY);
+      const stored = currentQueue ?? sessionStorage.getItem(LEGACY_GENERATED_CERTIFICATE_IDS_KEY);
+      const parsed: unknown = stored ? JSON.parse(stored) : [];
+      if (Array.isArray(parsed)) {
+        const ids = parsed.filter((id): id is string => typeof id === "string");
+        setGeneratedCertificateIds(ids);
+        if (!currentQueue && ids.length > 0) {
+          sessionStorage.setItem(GENERATED_CERTIFICATE_IDS_KEY, JSON.stringify(ids));
+        }
+        sessionStorage.removeItem(LEGACY_GENERATED_CERTIFICATE_IDS_KEY);
+      }
+    } catch {
+      // Ignore malformed or unavailable session storage.
+    }
+  }, []);
+
+  function saveGeneratedCertificateIds(ids: string[]) {
+    const uniqueIds = Array.from(new Set(ids));
+    setGeneratedCertificateIds(uniqueIds);
+    try {
+      if (uniqueIds.length > 0) {
+        sessionStorage.setItem(
+          GENERATED_CERTIFICATE_IDS_KEY,
+          JSON.stringify(uniqueIds)
+        );
+      } else {
+        sessionStorage.removeItem(GENERATED_CERTIFICATE_IDS_KEY);
+      }
+    } catch {
+      // The in-memory queue remains usable if session storage is unavailable.
+    }
+  }
+
   // Live preview helpers
   const objectUrl = useMemo(
     () => (templateFile ? URL.createObjectURL(templateFile) : null),
     [templateFile]
   );
-  const imgRef = useRef<HTMLImageElement | null>(null);
   const fullContainerRef = useRef<HTMLDivElement | null>(null);
   const [naturalSize, setNaturalSize] = useState<{
     w: number;
@@ -122,6 +187,30 @@ export default function Home() {
   useEffect(() => {
     if (objectUrl) setShowFull(true);
   }, [objectUrl]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/config", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Could not load issuer configuration");
+        return (await response.json()) as PublicIssuerConfig;
+      })
+      .then((config) => {
+        if (cancelled) return;
+        setIssuerName(config.name);
+        setPublicAppUrl(config.appUrl);
+        setCustomSubject(config.defaultEmailSubject);
+        setCustomMessage(config.defaultEmailMessage);
+        setProgramName(`${config.name} Program`);
+        setConfigurationStatus("ready");
+      })
+      .catch(() => {
+        setConfigurationStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function mapToDisplay(x: number, y: number) {
     const container = fullContainerRef.current;
@@ -196,32 +285,40 @@ export default function Home() {
   const [log, setLog] = useState<string[]>([]);
 
   async function ingestSheet() {
-    setLog((l) => [...l, "Reading Google Sheet..."]);
-    const res = await fetch("/api/sheets/ingest", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sheetUrl }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setLog((l) => [...l, `Error: ${data.error}`]);
+    if (!sheetUrl.trim()) {
+      setLog((entries) => [...entries, "Enter a Google Sheets URL first"]);
       return;
     }
-    setBatchId(data.batchId);
-    setPreview(data.preview ?? []);
-    setAllRows(data.rows ?? []);
-    setTotal(data.total ?? 0);
-    setLog((l) => [...l, `Loaded ${data.total} rows`]);
+    setIsLoadingSheet(true);
+    try {
+      setLog((l) => [...l, "Reading Google Sheet..."]);
+      const res = await fetch("/api/sheets/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sheetUrl }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not load Google Sheet");
+      setBatchId(data.batchId);
+      setPreview(data.preview ?? []);
+      setAllRows(data.rows ?? []);
+      setTotal(data.total ?? 0);
+      setLog((l) => [...l, `Loaded ${data.total} rows`]);
+    } catch (error) {
+      setLog((entries) => [...entries, `Error: ${error instanceof Error ? error.message : "Could not load Google Sheet"}`]);
+    } finally {
+      setIsLoadingSheet(false);
+    }
   }
 
-  async function uploadTemplate() {
+  async function uploadTemplate(): Promise<boolean> {
     if (!templateFile) {
       setLog((l) => [...l, "Select a template file first"]);
-      return;
+      return false;
     }
     if (!naturalSize) {
       setLog((l) => [...l, "Template hasn't loaded yet. Please wait."]);
-      return;
+      return false;
     }
     const fd = new FormData();
     fd.append("file", templateFile);
@@ -235,29 +332,27 @@ export default function Home() {
     fd.append("fontWeight", fontWeight);
     fd.append("fontColor", fontColor);
 
-    setLog((l) => [...l, "Uploading template..."]);
-    const res = await fetch("/api/templates", { method: "POST", body: fd });
-    const data = await res.json();
-    if (!res.ok) {
-      setLog((l) => [...l, `Error: ${data.error}`]);
-      return;
+    setIsUploadingTemplate(true);
+    try {
+      setLog((l) => [...l, "Uploading template..."]);
+      const res = await fetch("/api/templates", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Template upload failed");
+      setTemplateId(data.template.id);
+      setLog((l) => [...l, `Template saved: ${data.template.id}`]);
+      return true;
+    } catch (error) {
+      setLog((entries) => [...entries, `Error: ${error instanceof Error ? error.message : "Template upload failed"}`]);
+      return false;
+    } finally {
+      setIsUploadingTemplate(false);
     }
-    setTemplateId(data.template.id);
-    setSavedPlacement({
-      nameX,
-      nameY,
-      qrX,
-      qrY,
-      fontSize,
-      qrSize,
-      fontFamily,
-      fontWeight,
-      fontColor,
-      sampleName,
-    });
-    setLog((l) => [...l, `Template saved: ${data.template.id}`]);
   }
   async function generateCertificates(limit?: number) {
+    if (!canIssueCertificates) {
+      setLog((entries) => [...entries, "Configure the issuer name and public HTTPS APP_URL before issuing certificates"]);
+      return;
+    }
     if (!batchId || !templateId) {
       setLog((l) => [...l, "Ingest sheet and upload template first"]);
       if (limit)
@@ -266,7 +361,25 @@ export default function Home() {
       return;
     }
 
+    if (generatedCertificateIds.length > 0) {
+      const message =
+        "Send or reconcile the current generated certificates before starting another batch.";
+      setLog((l) => [...l, message]);
+      if (limit) setStatusTen({ state: "error", message });
+      else setStatusAll({ state: "error", message });
+      return;
+    }
+
     const rowsToProcess = limit ? allRows.slice(0, limit) : allRows;
+    if (rowsToProcess.length === 0) {
+      setLog((entries) => [...entries, "Load a non-empty roster before generating certificates"]);
+      if (limit) setStatusTen({ state: "error", message: "No roster rows loaded" });
+      else setStatusAll({ state: "error", message: "No roster rows loaded" });
+      return;
+    }
+    saveGeneratedCertificateIds([]);
+    setEmailStatus({ state: "idle" });
+    setEmailLogs([]);
 
     if (limit) setStatusTen({ state: "loading" });
     else {
@@ -284,7 +397,8 @@ export default function Home() {
     ]);
 
     const chunkSize = 10;
-    const totalProcessed: any[] = [];
+    const totalProcessed: GenerationResult[] = [];
+    const batchCertificateIds: string[] = [];
     let totalCreated = 0;
     let totalErrorCount = 0;
 
@@ -309,6 +423,8 @@ export default function Home() {
           body: JSON.stringify({
             batchId,
             templateId,
+            programName,
+            startIndex: i,
             rows: chunk,
           }),
         });
@@ -318,20 +434,29 @@ export default function Home() {
           throw new Error(data.error || "Chunk generation failed");
         }
 
-        const results = data.results ?? [];
+        const results: GenerationResult[] = data.results ?? [];
         totalProcessed.push(...results);
+        batchCertificateIds.push(
+          ...results
+            .filter(
+              (result): result is Extract<GenerationResult, { status: "created" }> =>
+                result.status === "created"
+            )
+            .map((result) => result.id)
+        );
+        saveGeneratedCertificateIds(batchCertificateIds);
 
         const chunkCreated = results.filter(
-          (r: any) => r.status === "created"
+          (r) => r.status === "created"
         ).length;
-        const chunkErrors = results.filter((r: any) => r.status === "error");
+        const chunkErrors = results.filter((r) => r.status === "error");
 
         totalCreated += chunkCreated;
         totalErrorCount += chunkErrors.length;
 
         // Show preview of the first generated certificate in the FIRST chunk
         if (i === 0) {
-          const firstCreated = results.find((r: any) => r.status === "created");
+          const firstCreated = results.find((r) => r.status === "created");
           if (firstCreated) {
             setLastPreview({
               imageUrl: firstCreated.imageUrl,
@@ -366,15 +491,16 @@ export default function Home() {
                 : `Progress: ${Math.min(i + chunkSize, rowsToProcess.length)}/${rowsToProcess.length}`,
           });
         }
-      } catch (err: any) {
-        setLog((l) => [...l, `Error in chunk ${chunkNum}: ${err.message}`]);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        setLog((l) => [...l, `Error in chunk ${chunkNum}: ${message}`]);
         if (limit) {
-          setStatusTen({ state: "error", message: err.message });
+          setStatusTen({ state: "error", message });
         } else {
           setStatusAll((s) => ({
             ...s,
             state: "error",
-            message: `Stopped at chunk ${chunkNum}: ${err.message}`,
+            message: `Stopped at chunk ${chunkNum}: ${message}`,
           }));
         }
         return; // Stop processing further chunks on error
@@ -388,9 +514,20 @@ export default function Home() {
   }
 
   async function generateOne() {
-    if (!templateId) {
-      setLog((l) => [...l, "Upload template first"]);
-      setStatusOne({ state: "error", message: "Upload template first" });
+    if (!canIssueCertificates) {
+      setStatusOne({ state: "error", message: "Configure the issuer name and public HTTPS APP_URL first" });
+      return;
+    }
+    if (generatedCertificateIds.length > 0) {
+      setStatusOne({
+        state: "error",
+        message: "Send or reconcile the current generated certificates first.",
+      });
+      return;
+    }
+    if (!templateId || !batchId) {
+      setLog((l) => [...l, "Load a roster and upload a template first"]);
+      setStatusOne({ state: "error", message: "Load a roster and upload a template first" });
       return;
     }
     if (preview.length === 0) {
@@ -401,15 +538,17 @@ export default function Home() {
     const singleRow = preview[0];
     setStatusOne({
       state: "loading",
-      message: `Generating preview for ${singleRow.fullName}...`,
+      message: `Creating a certificate for ${singleRow.fullName}...`,
     });
-    setLog((l) => [...l, `Generating preview for ${singleRow.fullName}...`]);
+    setLog((l) => [...l, `Creating a saved certificate for ${singleRow.fullName}...`]);
     const res = await fetch("/api/certificates/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        batchId: batchId ?? "preview-batch",
+        batchId,
         templateId,
+        programName,
+        startIndex: 0,
         rows: [singleRow],
       }),
     });
@@ -419,15 +558,16 @@ export default function Home() {
       setStatusOne({ state: "error", message: String(data.error || "Error") });
       return;
     }
-    const result = (data.results ?? [])[0];
+    const result = ((data.results ?? []) as GenerationResult[])[0];
     if (result?.status === "created") {
+      saveGeneratedCertificateIds([result.id]);
       setLastPreview({
         imageUrl: result.imageUrl,
         certificateNumber: result.certificateNumber,
         fullName: singleRow.fullName,
       });
-      setLog((l) => [...l, `Preview ready: ${result.certificateNumber}`]);
-      setStatusOne({ state: "done", message: "Preview complete" });
+      setLog((l) => [...l, `Certificate created: ${result.certificateNumber}`]);
+      setStatusOne({ state: "done", message: "Certificate created and saved" });
     } else {
       setLog((l) => [...l, "Preview generation failed"]);
       setStatusOne({ state: "error", message: "Preview generation failed" });
@@ -435,75 +575,81 @@ export default function Home() {
   }
 
   async function sendEmails() {
-    if (!batchId || preview.length === 0) {
-      setLog((l) => [...l, "No certificates to send emails for"]);
-      setEmailStatus({ state: "error", message: "No certificates loaded" });
+    if (!canIssueCertificates) {
+      setEmailStatus({ state: "error", message: "Configure the issuer name and public HTTPS APP_URL first" });
+      return;
+    }
+    if (generatedCertificateIds.length === 0) {
+      setLog((l) => [...l, "Generate certificates for this batch before sending emails"]);
+      setEmailStatus({ state: "error", message: "No generated certificates queued" });
       return;
     }
 
     setEmailStatus({ state: "loading" });
-    setLog((l) => [...l, "Fetching certificates from database..."]);
+    const certificateIds = [...generatedCertificateIds];
+    const results: EmailResult[] = [];
+    let sent = 0;
+    let failed = 0;
+    let skipped = 0;
+    try {
+      setLog((l) => [...l, `Sending emails for ${certificateIds.length} queued certificates...`]);
+      setEmailLogs([]);
+      for (const [index, certificateId] of certificateIds.entries()) {
+        // Persist the current and remaining IDs before each request so a tab/network failure is recoverable.
+        saveGeneratedCertificateIds(certificateIds.slice(index));
+        setEmailStatus({ state: "loading", sent, failed, message: `Processing ${index + 1}/${certificateIds.length}…` });
+        const emailRes = await fetch("/api/certificates/send-emails", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ certificateIds: [certificateId], customSubject, customMessage }),
+        });
+        const emailData = (await emailRes.json()) as SendEmailsResponse;
+        if (!emailRes.ok) throw new Error(emailData.error || "Email request failed");
 
-    // Fetch all certificates for this batch
-    const res = await fetch("/api/certificates/list", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ batchId }),
-    });
+        const result = emailData.results?.[0];
+        if (!result) throw new Error("The email service returned no result for this certificate");
+        results.push(result);
+        if (result.status === "sent") sent++;
+        else if (result.status === "failed" || result.status === "error") failed++;
+        else skipped++;
 
-    if (!res.ok) {
-      setLog((l) => [...l, "Error fetching certificates"]);
-      setEmailStatus({ state: "error", message: "Failed to fetch certificates" });
-      return;
+        const retryIds = results
+          .filter((entry) => entry.status === "failed" || entry.status === "error")
+          .map((entry) => entry.id)
+          .filter((id): id is string => typeof id === "string");
+        saveGeneratedCertificateIds([...retryIds, ...certificateIds.slice(index + 1)]);
+        setEmailLogs(results.map((entry) => ({
+          fullName: entry.fullName || "Unknown",
+          email: entry.email,
+          status: entry.status,
+          reason: entry.reason,
+          error: entry.error,
+        })));
+      }
+      setLog((l) => [
+        ...l,
+        `Emails sent: ${sent} successful, ${failed} failed, ${skipped} skipped`,
+      ]);
+      setEmailStatus({ state: "done", sent, failed });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Email request failed";
+      setLog((entries) => [...entries, `Error: ${message}`]);
+      setEmailStatus({ state: "error", message });
     }
-
-    const data = await res.json();
-    const certificateIds = (data.certificates || []).map((c: any) => c.id);
-
-    if (certificateIds.length === 0) {
-      setLog((l) => [...l, "No certificates found to send"]);
-      setEmailStatus({ state: "error", message: "No certificates found" });
-      return;
-    }
-
-    setLog((l) => [...l, `Sending emails to ${certificateIds.length} recipients...`]);
-
-    const emailRes = await fetch("/api/certificates/send-emails", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ certificateIds, customMessage }),
-    });
-
-    const emailData = await emailRes.json();
-
-    if (!emailRes.ok) {
-      setLog((l) => [...l, `Error: ${emailData.error}`]);
-      setEmailStatus({ state: "error", message: String(emailData.error) });
-      return;
-    }
-
-    const summary = emailData.summary || {};
-    const results = emailData.results || [];
-
-    // Populate email logs
-    setEmailLogs(results.map((r: any) => ({
-      fullName: r.fullName,
-      email: r.email,
-      status: r.status,
-      reason: r.reason,
-      error: r.error,
-    })));
-
-    setLog((l) => [
-      ...l,
-      `Emails sent: ${summary.sent || 0} successful, ${summary.failed || 0} failed, ${summary.skipped || 0} skipped`,
-    ]);
-    setEmailStatus({
-      state: "done",
-      sent: summary.sent,
-      failed: summary.failed,
-    });
   }
+
+  const filteredEmailLogs = emailLogs.filter((entry) => {
+    if (emailFilter === "all") return true;
+    if (emailFilter === "failed") {
+      return entry.status === "failed" || entry.status === "error";
+    }
+    return entry.status === emailFilter;
+  });
+  const isGenerating = [statusOne.state, statusTen.state, statusAll.state].includes("loading");
+  const canIssueCertificates =
+    configurationStatus === "ready" &&
+    issuerName !== "Certificate Issuer" &&
+    publicAppUrl.startsWith("https://");
 
   return (
     <div className="min-h-screen bg-zinc-50/50 dark:bg-zinc-950/50">
@@ -511,13 +657,32 @@ export default function Home() {
         <header className="mb-8 flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">
-              AAU Certificates Admin
+              {issuerName} Certificate Admin
             </h1>
           </div>
         </header>
 
+        {!canIssueCertificates && (
+          <div className="mb-6 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
+            {configurationStatus === "error"
+              ? "Issuer configuration could not be loaded. Check the server configuration before issuing."
+              : "Issuance is paused until ISSUER_NAME is set to the correct organization and APP_URL is the public HTTPS verification origin. A localhost QR link is not suitable for graduate certificates."}
+          </div>
+        )}
+
         <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
           <Section title="Data Source">
+            <div>
+              <label className="mb-2 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                Program or cohort name
+              </label>
+              <input
+                className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm outline-none ring-2 ring-transparent focus:ring-zinc-300 dark:border-zinc-800 dark:bg-zinc-900"
+                value={programName}
+                maxLength={200}
+                onChange={(event) => setProgramName(event.target.value)}
+              />
+            </div>
             <input
               className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm outline-none ring-2 ring-transparent focus:ring-zinc-300 dark:border-zinc-800 dark:bg-zinc-900"
               placeholder="Paste Google Sheets URL"
@@ -527,8 +692,9 @@ export default function Home() {
             <button
               className="inline-flex items-center justify-center rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
               onClick={ingestSheet}
+              disabled={isLoadingSheet}
             >
-              Load Sheet
+              {isLoadingSheet ? "Loading sheet…" : "Load Sheet"}
             </button>
             {total !== null && (
               <div className="text-sm text-zinc-700 dark:text-zinc-300">
@@ -579,7 +745,7 @@ export default function Home() {
                 are not supported.
               </p>
               <p className="text-[11px] text-zinc-500 dark:text-zinc-500">
-                Edits are applied only after selecting "Use This Template" in the
+                Edits are applied only after selecting &quot;Use This Template&quot; in the
                 editor.
               </p>
               {/* Full-screen positioning opens automatically when a template is chosen */}
@@ -689,11 +855,11 @@ export default function Home() {
                   <button
                     className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-white hover:bg-emerald-700"
                     onClick={async () => {
-                      await uploadTemplate();
-                      setShowFull(false);
+                      if (await uploadTemplate()) setShowFull(false);
                     }}
+                    disabled={isUploadingTemplate}
                   >
-                    Use This Template
+                    {isUploadingTemplate ? "Uploading…" : "Use This Template"}
                   </button>
                   <button
                     className="rounded bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
@@ -810,24 +976,32 @@ export default function Home() {
 
           <Section title="Generate Certificates">
             <p className="text-sm text-zinc-600 dark:text-zinc-400">
-              Creates PNG + PDF and stores them locally.
+              Creates PNG certificates and stores them locally. Generate One saves a real database record; it is not a disposable preview.
             </p>
+            {generatedCertificateIds.length > 0 && (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
+                {generatedCertificateIds.length} saved certificate(s) are still queued for this batch. Send or reconcile this queue before generating another batch.
+              </div>
+            )}
             <div className="flex flex-col gap-2 sm:flex-row">
               <button
                 className="inline-flex items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700"
                 onClick={generateOne}
+                disabled={!canIssueCertificates || isGenerating || generatedCertificateIds.length > 0}
               >
-                Generate One (preview)
+                Generate One (saves certificate)
               </button>
               <button
                 className="inline-flex items-center justify-center rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-amber-700"
                 onClick={() => generateCertificates(10)}
+                disabled={!canIssueCertificates || isGenerating || generatedCertificateIds.length > 0}
               >
-                Generate 10 at a time
+                Generate First 10
               </button>
               <button
                 className="inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700"
                 onClick={() => generateCertificates()}
+                disabled={!canIssueCertificates || isGenerating || generatedCertificateIds.length > 0}
               >
                 Generate All
               </button>
@@ -931,21 +1105,20 @@ export default function Home() {
                   </div>
                   <a
                     className="rounded-md bg-zinc-900 px-3 py-1 text-xs font-medium text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900"
-                    href={`/api/files?path=${encodeURIComponent(
-                      lastPreview.imageUrl
-                    )}`}
+                    href={lastPreview.imageUrl}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noopener noreferrer"
                   >
                     Open image
                   </a>
                 </div>
                 <div className="mt-2 overflow-hidden rounded-lg border border-zinc-100 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
-                  <img
-                    src={`/api/files?path=${encodeURIComponent(
-                      lastPreview.imageUrl
-                    )}`}
+                  <Image
+                    src={lastPreview.imageUrl}
                     alt="Generated preview"
+                    width={2000}
+                    height={1414}
+                    unoptimized
                     className="w-full max-h-80 object-contain"
                   />
                 </div>
@@ -958,9 +1131,21 @@ export default function Home() {
           <div className="grid gap-6 lg:grid-cols-2">
             <Section title="Send Emails">
               <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                Send generated certificates to recipients via email with a custom message.
+                Send only certificates generated in the current batch. Set the subject and message for this bootcamp before sending.
               </p>
               <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Email Subject
+                  </label>
+                  <input
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm outline-none ring-2 ring-transparent focus:ring-zinc-300 dark:border-zinc-800 dark:bg-zinc-900"
+                    value={customSubject}
+                    maxLength={200}
+                    onChange={(e) => setCustomSubject(e.target.value)}
+                    placeholder={`Your certificate from ${issuerName}`}
+                  />
+                </div>
                 <div>
                   <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
                     Custom Message
@@ -968,15 +1153,39 @@ export default function Home() {
                   <textarea
                     className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm outline-none ring-2 ring-transparent focus:ring-zinc-300 dark:border-zinc-800 dark:bg-zinc-900"
                     rows={4}
+                    maxLength={5000}
                     value={customMessage}
                     onChange={(e) => setCustomMessage(e.target.value)}
-                    placeholder="Enter a custom congratulations message..."
+                    placeholder="Enter a message for this bootcamp..."
                   />
                 </div>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                  Generated certificates queued: {generatedCertificateIds.length}. Successful or skipped sends are removed; failed sends remain available to retry.
+                </p>
+                {generatedCertificateIds.length > 0 && (
+                  <button
+                    className="w-full rounded-lg border border-amber-300 px-4 py-2 text-sm font-medium text-amber-900 hover:bg-amber-50 disabled:opacity-50 dark:border-amber-800 dark:text-amber-100 dark:hover:bg-amber-950"
+                    disabled={emailStatus.state === "loading"}
+                    onClick={() => {
+                      const confirmed = window.confirm(
+                        "Remove these certificate IDs from this browser's email queue? This does not delete the saved certificate records, and they will not be included in later batches."
+                      );
+                      if (!confirmed) return;
+                      saveGeneratedCertificateIds([]);
+                      setEmailStatus({ state: "idle" });
+                      setLog((entries) => [
+                        ...entries,
+                        "Queued certificate IDs cleared; saved certificate records remain in the database.",
+                      ]);
+                    }}
+                  >
+                    Remove queued certificates (keeps saved records)
+                  </button>
+                )}
                 <button
                   className="w-full inline-flex items-center justify-center rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-purple-700"
                   onClick={sendEmails}
-                  disabled={emailStatus.state === "loading"}
+                  disabled={!canIssueCertificates || emailStatus.state === "loading" || generatedCertificateIds.length === 0}
                 >
                   {emailStatus.state === "loading" ? (
                     <>
@@ -984,7 +1193,7 @@ export default function Home() {
                       Sending...
                     </>
                   ) : (
-                    "📧 Send Emails to All"
+                    "📧 Send Emails for This Batch"
                   )}
                 </button>
                 <div className="rounded-lg border border-zinc-200 bg-white/80 p-2 text-xs dark:border-zinc-800 dark:bg-zinc-900/70">
@@ -1037,9 +1246,7 @@ export default function Home() {
                     </div>
                   ) : (
                     <div className="max-h-[300px] overflow-auto p-2 space-y-2">
-                      {emailLogs
-                        .filter(l => emailFilter === "all" || l.status === (emailFilter as any))
-                        .map((log, idx) => (
+                      {filteredEmailLogs.map((log, idx) => (
                           <div
                             key={idx}
                             className={`flex items-start justify-between rounded-lg border px-3 py-2 text-xs ${log.status === "sent"
@@ -1076,7 +1283,7 @@ export default function Home() {
                             </div>
                           </div>
                         ))}
-                      {emailLogs.filter(l => emailFilter === "all" || l.status === (emailFilter as any)).length === 0 && (
+                      {filteredEmailLogs.length === 0 && (
                         <div className="py-8 text-center text-zinc-500 dark:text-zinc-400">
                           No {emailFilter} logs found.
                         </div>

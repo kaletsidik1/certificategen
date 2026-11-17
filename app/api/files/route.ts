@@ -1,29 +1,28 @@
 import { NextResponse } from "next/server";
-import fs from "node:fs";
-import path from "node:path";
+import fs from "node:fs/promises";
+import { resolveGeneratedImage } from "@/lib/storage";
 
-// Simple file serving for generated artifacts (images). Restrict to images folder.
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const target = searchParams.get("path");
-  if (!target) {
-    return NextResponse.json({ error: "path required" }, { status: 400 });
+export const runtime = "nodejs";
+
+export async function GET(request: Request) {
+  const fileName = new URL(request.url).searchParams.get("file");
+  if (!fileName) {
+    return NextResponse.json({ error: "file is required" }, { status: 400 });
   }
-  const imagesRoot = path.join(process.cwd(), "certificate-store", "images");
-  const resolved = path.resolve(target);
-  if (!resolved.startsWith(imagesRoot)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 403 });
-  }
+
   try {
-    const file = await fs.promises.readFile(resolved);
+    const filePath = resolveGeneratedImage(fileName);
+    const file = await fs.readFile(filePath);
     return new NextResponse(file, {
-      status: 200,
       headers: {
         "Content-Type": "image/png",
-        "Cache-Control": "private, max-age=0, must-revalidate",
+        "Content-Length": String(file.byteLength),
+        "Content-Disposition": "inline",
+        "Cache-Control": "private, no-store, max-age=0",
+        "X-Content-Type-Options": "nosniff",
       },
     });
-  } catch (err) {
-    return NextResponse.json({ error: "not found" }, { status: 404 });
+  } catch {
+    return NextResponse.json({ error: "Image not found" }, { status: 404 });
   }
 }

@@ -13,11 +13,17 @@ model Certificate {
   email             String?
   certificateNumber String  @unique
   qrData            String? // Text to be displayed on the QR code
-  imagePath         String? // Local path to certificate image
+  imagePath         String? // Relative path under CERTIFICATE_STORAGE_DIR; legacy absolute paths remain readable
+  batchId           String?
+  rowIndex          Int?
+  programName       String?
 
   issuedAt DateTime @default(now())
 
   emailSentAt DateTime?
+  emailSendingAt DateTime?
   emailStatus String?   @default("PENDING") // e.g., SUCCESS, FAILED, PENDING
   emailError  String?
+
+  @@unique([batchId, rowIndex])
 }
