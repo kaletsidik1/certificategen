@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint app lib tests proxy.ts next.config.ts",
     "typecheck": "tsc --noEmit --project tsconfig.typecheck.json",
-    "test": "tsx --test tests/admin-auth.test.ts tests/storage.test.ts",
+    "test": "tsx --test tests/admin-auth.test.ts tests/storage.test.ts tests/email-template.test.ts tests/issuer.test.ts",
     "check": "npm run lint && npm run typecheck && npm test",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",

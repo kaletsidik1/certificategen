@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import { prisma } from "@/lib/prisma";
 import { getAppUrl, getIssuerConfig } from "@/lib/issuer";
 import { resolveStoredFile } from "@/lib/storage";
+import { renderCertificateEmail } from "@/lib/email-template";
 import { sendEmail } from "@/lib/mail";
 
 export const runtime = "nodejs";
@@ -20,16 +21,6 @@ const MAX_BATCH_SIZE = 100;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const SENDING_LEASE_MS = 15 * 60 * 1000;
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (character) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  })[character]!);
-}
-
 function isValidEmail(value: string): boolean {
   return value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
@@ -40,38 +31,6 @@ function formatName(fullName: string): string {
     .split(/\s+/)
     .map((word) => word.charAt(0).toLocaleUpperCase() + word.slice(1).toLocaleLowerCase())
     .join(" ");
-}
-
-function renderEmail(input: {
-  recipientName: string;
-  message: string;
-  verifyUrl: string;
-  issuerName: string;
-  websiteUrl?: string;
-  linkedinUrl?: string;
-  supportEmail?: string;
-}): string {
-  const links = [input.websiteUrl, input.linkedinUrl].filter((value): value is string => Boolean(value));
-  const organizationLink = links.map((url) =>
-    `<a href="${escapeHtml(url)}" rel="noopener noreferrer">${escapeHtml(input.issuerName)}</a>`
-  ).join(" · ");
-  const support = input.supportEmail
-    ? `<p>Support: <a href="mailto:${escapeHtml(input.supportEmail)}">${escapeHtml(input.supportEmail)}</a></p>`
-    : "";
-
-  return `<!doctype html>
-<html><body style="margin:0;background:#f4f4f5;font-family:Arial,sans-serif;color:#27272a;line-height:1.6">
-  <main style="max-width:600px;margin:24px auto;padding:24px;background:#fff;border-radius:12px">
-    <h1 style="font-size:24px">Congratulations, ${escapeHtml(input.recipientName)}!</h1>
-    <p>${escapeHtml(input.message).replace(/\r\n|\r|\n/g, "<br>")}</p>
-    <p>Your certificate is attached. You can also verify it online:</p>
-    <p><a href="${escapeHtml(input.verifyUrl)}" rel="noopener noreferrer">Verify certificate</a></p>
-    <p>Keep your certificate safe as proof of your achievement.</p>
-    ${support}
-    <hr style="border:0;border-top:1px solid #e4e4e7;margin:24px 0">
-    <footer style="font-size:12px;color:#71717a">Issued by ${organizationLink || escapeHtml(input.issuerName)}</footer>
-  </main>
-</body></html>`;
 }
 
 export async function POST(request: Request) {
@@ -164,11 +123,12 @@ export async function POST(request: Request) {
           throw new Error("Certificate attachment exceeds the size limit");
         }
         const verifyUrl = `${appUrl}/verify/${encodeURIComponent(certificate.certificateNumber)}`;
-        const html = renderEmail({
+        const html = renderCertificateEmail({
           recipientName: formatName(certificate.fullName),
           message: messageText,
           verifyUrl,
           issuerName: issuer.name,
+          issuerShortName: issuer.shortName,
           websiteUrl: issuer.websiteUrl,
           linkedinUrl: issuer.linkedinUrl,
           supportEmail: issuer.supportEmail,

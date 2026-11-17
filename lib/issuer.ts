@@ -1,5 +1,6 @@
 export type IssuerConfig = {
   name: string;
+  shortName?: string;
   websiteUrl?: string;
   linkedinUrl?: string;
   supportEmail?: string;
@@ -10,7 +11,7 @@ export type IssuerConfig = {
 };
 
 const DEFAULT_EMAIL_MESSAGE =
-  "Congratulations on completing your program with {issuer}! Thank you for your patience while we prepared your certificate. We appreciate your time with us and wish you continued success.";
+  "Congratulations on completing your bootcamp with {issuer}! We appreciate your patience and understanding while we prepared your certificate. We are pleased to share it with you and wish you continued success.";
 
 function optionalHttpsUrl(value: string | undefined, variable: string): string | undefined {
   const candidate = value?.trim();
@@ -34,8 +35,9 @@ function applyIssuerPlaceholder(value: string, issuerName: string): string {
 
 export function getIssuerConfig(): IssuerConfig {
   const name = process.env.ISSUER_NAME?.trim() || "Certificate Issuer";
+  const shortName = process.env.ISSUER_SHORT_NAME?.trim();
   const subjectTemplate =
-    process.env.DEFAULT_EMAIL_SUBJECT?.trim() || "Your certificate from {issuer}";
+    process.env.DEFAULT_EMAIL_SUBJECT?.trim() || "Your {issuer} Bootcamp Certificate";
   const messageTemplate =
     process.env.DEFAULT_EMAIL_MESSAGE?.trim() || DEFAULT_EMAIL_MESSAGE;
   const certificateNumberPrefix =
@@ -43,6 +45,9 @@ export function getIssuerConfig(): IssuerConfig {
   const locale = process.env.ISSUER_LOCALE?.trim() || "en-US";
 
   if (name.length > 120) throw new Error("ISSUER_NAME must be 120 characters or fewer");
+  if (shortName && (shortName.length > 80 || /[\u0000-\u001f\u007f]/.test(shortName))) {
+    throw new Error("ISSUER_SHORT_NAME must be at most 80 characters and contain no control characters");
+  }
   if (process.env.NODE_ENV === "production" && name === "Certificate Issuer") {
     throw new Error("ISSUER_NAME must be configured before production issuance");
   }
@@ -68,6 +73,7 @@ export function getIssuerConfig(): IssuerConfig {
 
   return {
     name,
+    shortName,
     websiteUrl: optionalHttpsUrl(process.env.ISSUER_WEBSITE_URL, "ISSUER_WEBSITE_URL"),
     linkedinUrl: optionalHttpsUrl(process.env.ISSUER_LINKEDIN_URL, "ISSUER_LINKEDIN_URL"),
     supportEmail,

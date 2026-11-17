@@ -49,9 +49,10 @@ See [`.env.example`](.env.example) for the complete list. Important issuer and e
 | `ISSUER_NAME` | Organization shown on verification pages and email footers |
 | `ISSUER_WEBSITE_URL`, `ISSUER_LINKEDIN_URL` | Optional HTTPS issuer links |
 | `ISSUER_SUPPORT_EMAIL` | Optional support contact shown in email |
+| `ISSUER_SHORT_NAME` | Optional short issuer name used for social-link calls to action |
 | `ISSUER_LOCALE` | Locale used to format issue dates on verification pages |
 | `CERTIFICATE_NUMBER_PREFIX` | 1–12 character uppercase prefix for new serial numbers |
-| `DEFAULT_EMAIL_SUBJECT`, `DEFAULT_EMAIL_MESSAGE` | Editable defaults; `{issuer}` is replaced at runtime |
+| `DEFAULT_EMAIL_SUBJECT`, `DEFAULT_EMAIL_MESSAGE` | Editable defaults; `{issuer}` is replaced at runtime. The admin can override both per batch. |
 | `APP_URL` | Public HTTPS origin embedded in verification QR codes and emails |
 | `ADMIN_USERNAME`, `ADMIN_PASSWORD` | HTTP Basic Auth credentials for `/` and all `/api/*` routes |
 | `CERTIFICATE_STORAGE_DIR` | Persistent local directory for PNGs and templates |
